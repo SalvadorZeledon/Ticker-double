@@ -21,3 +21,66 @@ Antes de comenzar, instala las dependencias con:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Si no tienes el archivo `requirements.txt`, crea uno con este contenido:
+
+```
+PySide6
+pyqtgraph
+qasync
+aiohttp
+```
+
+---
+
+## 🚀 Ejecución
+
+1. Clona el repositorio:
+
+```bash
+git clone https://github.com/TU_USUARIO/Ticker-de-dos-monedas-con-graficas-simultaneas-en-tiempo-real.git
+cd Ticker-de-dos-monedas-con-graficas-simultaneas-en-tiempo-real
+```
+
+2. Instala las dependencias:
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Ejecuta la aplicación:
+
+```bash
+python app.py
+```
+
+---
+
+## 🖼 Capturas de pantalla
+
+*(Agrega aquí imágenes del programa en ejecución)*
+
+---
+
+## 🛠 Tecnologías utilizadas
+
+- [Python 3.10+](https://www.python.org/)
+- [PySide6](https://pypi.org/project/PySide6/)
+- [PyQtGraph](https://www.pyqtgraph.org/)
+- [qasync](https://pypi.org/project/qasync/)
+- [aiohttp](https://docs.aiohttp.org/en/stable/)
+
+---
+
+## 📈 Próximas mejoras
+
+- Soporte para **WebSockets** con datos en tiempo real para criptomonedas.
+- Agregar **tercer gráfica** para ratio o spread entre divisas.
+- Exportar datos a **CSV** para análisis posterior.
+
+---
+
+## 👨‍💻 Autor
+
+Desarrollado por **Salvador Zeledón** como proyecto académico de programación concurrente y visualización en tiempo real.
