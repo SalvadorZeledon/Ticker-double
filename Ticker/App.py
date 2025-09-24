@@ -1,204 +1,156 @@
-import sys
-import asyncio
-from collections import deque
-from datetime import datetime, timezone
+import threading
+import time
+import queue
+from datetime import datetime
+import requests
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.widgets import Button
+import matplotlib.animation as animation
 
-from typing import Deque, Dict, Tuple
+INTERVALO_CONSULTA = 2.0   
+MAX_PUNTOS = 300            
+ACTIVO_A = "BTCUSDT"       
+ACTIVO_B = "ETHUSDT"       
 
-import aiohttp
-from PySide6 import QtWidgets, QtCore
-import pyqtgraph as pg
-from qasync import QEventLoop, asyncSlot
+cola_a, cola_b = queue.Queue(), queue.Queue()
 
-# ---- Recomendado en Windows para compatibilidad con qasync/aiohttp ----
-if sys.platform.startswith("win"):
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
+pausado_a = threading.Event()
+pausado_b = threading.Event()
+detener_hilos = threading.Event()
 
 
-# --------- Config ----------
-POLL_INTERVAL_SEC = 2
-BUFFER_POINTS = 300  # ~10 min si actualizas cada 2 s
-PAIRS = [
-    ("USD", "EUR"),
-    ("USD", "JPY"),
-]
+def obtener_precio_binance(simbolo: str) -> float:
 
-# --------- Estado en memoria ----------
-class SeriesState:
-    def __init__(self, label: str, color: str = None):
-        self.label = label
-        self.ts: Deque[float] = deque(maxlen=BUFFER_POINTS)
-        self.values: Deque[float] = deque(maxlen=BUFFER_POINTS)
-        self.paused = False
-        self.color = color
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={simbolo}"
+    resp = requests.get(url, timeout=5)
+    resp.raise_for_status()
+    return float(resp.json()['price'])
 
-SERIES: Dict[Tuple[str, str], SeriesState] = {
-    pair: SeriesState(label=f"{pair[0]}/{pair[1]}")
-    for pair in PAIRS
-}
 
-# --------- Networking ----------
-def build_url_convert(base: str, quote: str) -> str:
-    # Endpoint con clave 'result'
-    return f"https://api.exchangerate.host/convert?from={base}&to={quote}"
+def hilo_precios(simbolo: str, cola_salida: queue.Queue, evento_pausa: threading.Event):
 
-def build_url_frankfurter(base: str, quote: str) -> str:
-    # Fallback con clave 'rates'
-    return f"https://api.frankfurter.app/latest?from={base}&to={quote}"
+    while not detener_hilos.is_set():
+        if evento_pausa.is_set():
+            time.sleep(0.2)
+            continue
 
-async def fetch_rate(session: aiohttp.ClientSession, base: str, quote: str) -> float:
-    # 1) Intento: exchangerate.host/convert  -> data['result']
-    try:
-        url = build_url_convert(base, quote)
-        async with session.get(url, timeout=10) as r:
-            r.raise_for_status()
-            # content_type=None por si el server manda content-type raro
-            data = await r.json(content_type=None)
-            if isinstance(data, dict) and "result" in data and data["result"] is not None:
-                return float(data["result"])
-            # si llegó pero sin 'result', forzamos except para fallback
-            raise KeyError("result")
-    except Exception as e1:
-        # 2) Fallback: frankfurter.app/latest -> data['rates'][quote]
+        momento = datetime.now()
+
         try:
-            url = build_url_frankfurter(base, quote)
-            async with session.get(url, timeout=10) as r:
-                r.raise_for_status()
-                data = await r.json(content_type=None)
-                if isinstance(data, dict) and "rates" in data and quote in data["rates"]:
-                    return float(data["rates"][quote])
-                raise KeyError("rates/quote")
-        except Exception as e2:
-            # Re-lanzamos con un mensaje útil para ver qué devolvió el server
-            snippet = ""
-            try:
-                snippet = str(data)[:200]  # lo que alcanzamos a ver
-            except Exception:
-                pass
-            raise RuntimeError(
-                f"Respuesta inesperada para {base}/{quote}. "
-                f"Primario: {type(e1).__name__}, Fallback: {type(e2).__name__}. "
-                f"Snippet: {snippet}"
-            )
+            precio = obtener_precio_binance(simbolo)
+        except Exception as ex:
+            print(f"[{simbolo}] Error API: {ex}")
+            time.sleep(INTERVALO_CONSULTA)
+            continue
+
+        cola_salida.put((momento, precio))
+
+        transcurrido = 0.0
+        while transcurrido < INTERVALO_CONSULTA and not detener_hilos.is_set():
+            time.sleep(0.1)
+            transcurrido += 0.1
 
 
-async def poll_symbol(pair: tuple[str, str]):
-    base, quote = pair
-    state = SERIES[pair]
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                if not state.paused:
-                    price = await fetch_rate(session, base, quote)
-                    
-                    # Nueva forma recomendada para timestamps en UTC
-                    now = datetime.now(timezone.utc).timestamp()
-                    
-                    state.ts.append(now)
-                    state.values.append(price)
-                    print(f"[{base}/{quote}] {price}")
-                
-                await asyncio.sleep(POLL_INTERVAL_SEC)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"[WARN] {base}/{quote}: {e}")
-                await asyncio.sleep(2)
+def crear_grafico():
+
+    plt.style.use('seaborn-v0_8')
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+    fig.suptitle(f"Comparación en vivo: {ACTIVO_A} vs {ACTIVO_B} (cada {INTERVALO_CONSULTA}s)")
+
+    linea_a, = ax1.plot([], [], '-', linewidth=1.2, label=ACTIVO_A)
+    ax1.set_ylabel("Precio (USDT)")
+    ax1.legend(loc='upper left')
+    ax1.grid(True)
+
+    linea_b, = ax2.plot([], [], '-', linewidth=1.2, label=ACTIVO_B)
+    ax2.set_ylabel("Precio (USDT)")
+    ax2.legend(loc='upper left')
+    ax2.grid(True)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+
+    plt.subplots_adjust(bottom=0.18, hspace=0.08)
+
+    return fig, ax1, ax2, linea_a, linea_b
 
 
-# --------- UI ----------
-class MainWindow(QtWidgets.QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Ticker USD/EUR y USD/JPY (async, 2s)")
-        self.resize(900, 600)
+def crear_botones(fig):
 
-        self.plot1 = pg.PlotWidget(title="USD/EUR")
-        self.plot2 = pg.PlotWidget(title="USD/JPY")
-        for p in (self.plot1, self.plot2):
-            p.showGrid(x=True, y=True, alpha=0.3)
-            p.setLabel("bottom", "Tiempo (UTC)")
-            p.setLabel("left", "Precio")
+    axpausar_a = plt.axes([0.15, 0.05, 0.15, 0.06])
+    axreanudar_a = plt.axes([0.32, 0.05, 0.15, 0.06])
+    axpausar_b = plt.axes([0.55, 0.05, 0.15, 0.06])
+    axreanudar_b = plt.axes([0.72, 0.05, 0.15, 0.06])
 
-        self.curve1 = self.plot1.plot([], [], pen=pg.mkPen(width=2))
-        self.curve2 = self.plot2.plot([], [], pen=pg.mkPen(width=2))
+    btn_pausar_a = Button(axpausar_a, 'Pausar A')
+    btn_reanudar_a = Button(axreanudar_a, 'Reanudar A')
+    btn_pausar_b = Button(axpausar_b, 'Pausar B')
+    btn_reanudar_b = Button(axreanudar_b, 'Reanudar B')
 
-        self.btn_usdeur = QtWidgets.QPushButton("Pausar USD/EUR")
-        self.btn_usdjpy = QtWidgets.QPushButton("Pausar USD/JPY")
+    btn_pausar_a.on_clicked(lambda e: (pausado_a.set(), print(f"[{ACTIVO_A}] Pausado")))
+    btn_reanudar_a.on_clicked(lambda e: (pausado_a.clear(), print(f"[{ACTIVO_A}] Reanudado")))
+    btn_pausar_b.on_clicked(lambda e: (pausado_b.set(), print(f"[{ACTIVO_B}] Pausado")))
+    btn_reanudar_b.on_clicked(lambda e: (pausado_b.clear(), print(f"[{ACTIVO_B}] Reanudado")))
 
-        self.btn_usdeur.clicked.connect(self.toggle_usdeur)
-        self.btn_usdjpy.clicked.connect(self.toggle_usdjpy)
+    return [btn_pausar_a, btn_reanudar_a, btn_pausar_b, btn_reanudar_b]
 
-        plots = QtWidgets.QHBoxLayout()
-        plots.addWidget(self.plot1, 1)
-        plots.addWidget(self.plot2, 1)
 
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.addWidget(self.btn_usdeur)
-        buttons.addWidget(self.btn_usdjpy)
-        buttons.addStretch(1)
+def iniciar_hilos():
+    t_a = threading.Thread(target=hilo_precios, args=(ACTIVO_A, cola_a, pausado_a), daemon=True)
+    t_b = threading.Thread(target=hilo_precios, args=(ACTIVO_B, cola_b, pausado_b), daemon=True)
+    t_a.start()
+    t_b.start()
 
-        root = QtWidgets.QVBoxLayout(self)
-        root.addLayout(plots, 1)
-        root.addLayout(buttons)
+def principal():
+    iniciar_hilos()
 
-        # Refresco visual independiente del polling (suave, 1 s)
-        self.ui_timer = QtCore.QTimer(self)
-        self.ui_timer.setInterval(2000)
-        self.ui_timer.timeout.connect(self.redraw)
-        self.ui_timer.start()
+    fig, ax1, ax2, linea_a, linea_b = crear_grafico()
+    crear_botones(fig)
 
-    @asyncSlot()
-    async def toggle_usdeur(self):
-        pair = ("USD", "EUR")
-        SERIES[pair].paused = not SERIES[pair].paused
-        self.btn_usdeur.setText("Reanudar USD/EUR" if SERIES[pair].paused else "Pausar USD/EUR")
+    tiempos_a, precios_a = [], []
+    tiempos_b, precios_b = [], []
 
-    @asyncSlot()
-    async def toggle_usdjpy(self):
-        pair = ("USD", "JPY")
-        SERIES[pair].paused = not SERIES[pair].paused
-        self.btn_usdjpy.setText("Reanudar USD/JPY" if SERIES[pair].paused else "Pausar USD/JPY")
+    def actualizar(frame):
+        nonlocal tiempos_a, precios_a, tiempos_b, precios_b
 
-    def redraw(self):
-        s1 = SERIES[("USD", "EUR")]
-        if s1.ts:
-            x = list(s1.ts); y = list(s1.values)
-            t0 = x[0]; xr = [xi - t0 for xi in x]
-            self.curve1.setData(xr, y)
+        while not cola_a.empty():
+            ts, precio = cola_a.get_nowait()
+            tiempos_a.append(ts)
+            precios_a.append(precio)
 
-        s2 = SERIES[("USD", "JPY")]
-        if s2.ts:
-            x = list(s2.ts); y = list(s2.values)
-            t0 = x[0]; xr = [xi - t0 for xi in x]
-            self.curve2.setData(xr, y)
+        while not cola_b.empty():
+            ts, precio = cola_b.get_nowait()
+            tiempos_b.append(ts)
+            precios_b.append(precio)
 
-def main():
-    app = QtWidgets.QApplication(sys.argv)
+        tiempos_a, precios_a = tiempos_a[-MAX_PUNTOS:], precios_a[-MAX_PUNTOS:]
+        tiempos_b, precios_b = tiempos_b[-MAX_PUNTOS:], precios_b[-MAX_PUNTOS:]
 
-    # Integramos Qt con asyncio
-    loop = QEventLoop(app)
-    asyncio.set_event_loop(loop)
+        if tiempos_a:
+            linea_a.set_data(mdates.date2num(tiempos_a), precios_a)
+            ax1.relim()
+            ax1.autoscale_view()
 
-    win = MainWindow()
-    win.show()
+        if tiempos_b:
+            linea_b.set_data(mdates.date2num(tiempos_b), precios_b)
+            ax2.relim()
+            ax2.autoscale_view()
 
-    # >>> CREA LAS TAREAS EN ESTE LOOP <<<
-    tasks = [loop.create_task(poll_symbol(pair)) for pair in PAIRS]
+        return linea_a, linea_b
+        
+    anim = animation.FuncAnimation(fig, actualizar, interval=1000, blit=False, cache_frame_data=False)
 
-    # Cancelar tareas al salir
-    def _cleanup():
-        for t in tasks:
-            t.cancel()
+    def al_cerrar(evento):
+        detener_hilos.set()
+        time.sleep(0.2)
 
-    app.aboutToQuit.connect(_cleanup)
+    fig.canvas.mpl_connect('close_event', al_cerrar)
 
-    with loop:
-        loop.run_forever()
+    plt.show()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        principal()
+    except KeyboardInterrupt:
+        detener_hilos.set()
+        print("Interrumpido por usuario.")
